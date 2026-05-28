@@ -183,34 +183,39 @@ const DELETE_RAW_DATA = false;
 
 const AGGREGATE_PHASES = [
   {
-    name: '1-3小时(2分钟桶)',
+    name: '1-3小时(4分钟桶)',
     minHours: 1,
     maxHours: 3,
-    bucketSeconds: 120
+    bucketSeconds: 240,
+    sourceBucketSeconds: null
   },
   {
-    name: '3-6小时(4分钟桶)',
+    name: '3-6小时(8分钟桶)',
     minHours: 3,
     maxHours: 6,
-    bucketSeconds: 240
+    bucketSeconds: 480,
+    sourceBucketSeconds: 240
   },
   {
-    name: '6-24小时(8分钟桶)',
+    name: '6-24小时(16分钟桶)',
     minHours: 6,
     maxHours: 24,
-    bucketSeconds: 480
+    bucketSeconds: 960,
+    sourceBucketSeconds: 480
   },
   {
-    name: '24-48小时(10分钟桶)',
+    name: '24-48小时(32分钟桶)',
     minHours: 24,
     maxHours: 48,
-    bucketSeconds: 600
+    bucketSeconds: 1920,
+    sourceBucketSeconds: 960
   },
   {
-    name: '48-72小时(15分钟桶)',
+    name: '48小时及以上(60分钟桶)',
     minHours: 48,
-    maxHours: 72,
-    bucketSeconds: 900
+    maxHours: 1000,
+    bucketSeconds: 3600,
+    sourceBucketSeconds: 1920
   }
 ];
 
@@ -238,7 +243,7 @@ const COLUMN_MAP = {
   'disk_used': 'disk_used_avg'
 };
 
-async function aggregateAndDelete(db, startTime, endTime, bucketSeconds, phaseName) {
+async function aggregateFromRaw(db, startTime, endTime, bucketSeconds, phaseName) {
   const bucketMs = bucketSeconds * 1000;
   
   const rawCountResult = await db.prepare(`
@@ -343,13 +348,119 @@ async function aggregateAndDelete(db, startTime, endTime, bucketSeconds, phaseNa
   return { aggregated, deleted, rawCount };
 }
 
+async function aggregateFromAggregated(db, startTime, endTime, targetBucketSeconds, sourceBucketSeconds, phaseName) {
+  const sourceBucketMs = sourceBucketSeconds * 1000;
+  const targetBucketMs = targetBucketSeconds * 1000;
+  
+  const sourceCountResult = await db.prepare(`
+    SELECT COUNT(*) as count FROM metrics_aggregated
+    WHERE bucket_size = ?
+      AND bucket >= ?
+      AND bucket < ?
+  `).bind(sourceBucketSeconds, startTime, endTime).first();
+  
+  const sourceCount = sourceCountResult?.count || 0;
+  
+  if (sourceCount === 0) {
+    console.log(`[Aggregate] ${phaseName}: 无源聚合数据 (桶${sourceBucketSeconds}秒)，跳过`);
+    return { aggregated: 0, deleted: 0, rawCount: 0 };
+  }
+  
+  const aggregateResult = await db.prepare(`
+    INSERT OR IGNORE INTO metrics_aggregated (
+      server_id, bucket, bucket_size,
+      cpu_avg, cpu_max,
+      ram_avg, ram_max,
+      disk_avg, disk_max,
+      load_avg_avg,
+      net_in_speed_avg, net_out_speed_avg,
+      net_rx_avg, net_tx_avg,
+      processes_avg, tcp_conn_avg, udp_conn_avg,
+      ping_ct_avg, ping_cu_avg, ping_cm_avg, ping_bd_avg,
+      ram_total_avg, ram_used_avg,
+      swap_total_avg, swap_used_avg,
+      disk_total_avg, disk_used_avg
+    )
+    SELECT 
+      server_id,
+      CAST(bucket / ? AS INTEGER) * ? AS bucket,
+      ? AS bucket_size,
+      AVG(cpu_avg), MAX(cpu_max),
+      AVG(ram_avg), MAX(ram_max),
+      AVG(disk_avg), MAX(disk_max),
+      AVG(load_avg_avg),
+      AVG(net_in_speed_avg), AVG(net_out_speed_avg),
+      AVG(net_rx_avg), AVG(net_tx_avg),
+      AVG(processes_avg), AVG(tcp_conn_avg), AVG(udp_conn_avg),
+      AVG(ping_ct_avg), AVG(ping_cu_avg), AVG(ping_cm_avg), AVG(ping_bd_avg),
+      AVG(ram_total_avg), AVG(ram_used_avg),
+      AVG(swap_total_avg), AVG(swap_used_avg),
+      AVG(disk_total_avg), AVG(disk_used_avg)
+    FROM metrics_aggregated
+    WHERE bucket_size = ?
+      AND bucket >= ?
+      AND bucket < ?
+    GROUP BY server_id, CAST(bucket / ? AS INTEGER)
+  `).bind(
+    targetBucketMs, targetBucketMs, targetBucketSeconds,
+    sourceBucketSeconds, startTime, endTime, targetBucketMs
+  ).run();
+  
+  const aggregated = aggregateResult.meta.changes || 0;
+  
+  const existingTargetResult = await db.prepare(`
+    SELECT server_id, bucket FROM metrics_aggregated
+    WHERE bucket_size = ?
+      AND bucket >= ?
+      AND bucket < ?
+  `).bind(targetBucketSeconds, startTime, endTime).all();
+  
+  const existingTargetKeys = new Set(
+    existingTargetResult.results.map(r => `${r.server_id}_${r.bucket}`)
+  );
+  
+  const sourceToDeleteResult = await db.prepare(`
+    SELECT id, server_id, bucket FROM metrics_aggregated
+    WHERE bucket_size = ?
+      AND bucket >= ?
+      AND bucket < ?
+  `).bind(sourceBucketSeconds, startTime, endTime).all();
+  
+  const idsToDelete = [];
+  for (const row of sourceToDeleteResult.results) {
+    const targetBucket = Math.floor(row.bucket / targetBucketMs) * targetBucketMs;
+    const key = `${row.server_id}_${targetBucket}`;
+    if (existingTargetKeys.has(key)) {
+      idsToDelete.push(row.id);
+    }
+  }
+  
+  let deleted = 0;
+  if (DELETE_RAW_DATA && idsToDelete.length > 0) {
+    const batchSize = 500;
+    for (let i = 0; i < idsToDelete.length; i += batchSize) {
+      const batch = idsToDelete.slice(i, i + batchSize);
+      const placeholders = batch.map(() => '?').join(',');
+      const deleteResult = await db.prepare(`
+        DELETE FROM metrics_aggregated WHERE id IN (${placeholders})
+      `).bind(...batch).run();
+      deleted += deleteResult.meta.changes || 0;
+    }
+  }
+  
+  const deleteStatus = DELETE_RAW_DATA ? `删除源聚合 ${deleted} 条` : `[测试模式] 跳过删除 (将删除 ${idsToDelete.length} 条)`;
+  console.log(`[Aggregate] ${phaseName}: 源聚合数据 ${sourceCount} 条, 新增聚合 ${aggregated} 组, ${deleteStatus}`);
+  
+  return { aggregated, deleted, rawCount: sourceCount };
+}
+
 function getBucketSizesForHours(hours) {
   const sizes = [];
-  if (hours > 1) sizes.push(120);
-  if (hours > 3) sizes.push(240);
-  if (hours > 6) sizes.push(480);
-  if (hours > 24) sizes.push(600);
-  if (hours > 48) sizes.push(900);
+  if (hours > 1) sizes.push(240);
+  if (hours > 3) sizes.push(480);
+  if (hours > 6) sizes.push(960);
+  if (hours > 24) sizes.push(1920);
+  if (hours > 48) sizes.push(3600);
   return sizes;
 }
 
@@ -474,9 +585,16 @@ export async function cleanupOldData(db, force = false) {
       const phaseStart = now - (phase.maxHours * 60 * 60 * 1000);
       const phaseEnd = now - (phase.minHours * 60 * 60 * 1000);
       
-      const phaseResult = await aggregateAndDelete(
-        db, phaseStart, phaseEnd, phase.bucketSeconds, phase.name
-      );
+      let phaseResult;
+      if (phase.sourceBucketSeconds === null) {
+        phaseResult = await aggregateFromRaw(
+          db, phaseStart, phaseEnd, phase.bucketSeconds, phase.name
+        );
+      } else {
+        phaseResult = await aggregateFromAggregated(
+          db, phaseStart, phaseEnd, phase.bucketSeconds, phase.sourceBucketSeconds, phase.name
+        );
+      }
       
       stats.aggregated += phaseResult.aggregated;
       stats.deleted += phaseResult.deleted;
