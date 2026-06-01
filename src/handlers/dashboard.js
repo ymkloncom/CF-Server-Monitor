@@ -1,5 +1,4 @@
 import { checkAuth, simpleAuthResponse } from '../middleware/auth.js';
-import { formatBytes, getPingColor } from '../utils/format.js';
 import { getLatestMetrics, getLatestMetricsForAllServers } from '../database/schema.js';
 
 export async function handleServerAPI(request, env, sys) {
