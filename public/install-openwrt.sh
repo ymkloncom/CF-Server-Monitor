@@ -134,10 +134,10 @@ detect_os() {
 install_deps() {
     step "检查系统依赖组件..."
 
-    required_pkgs="curl coreutils procps-ng ip-full"
-
     case "$PKG_MGR" in
         apk)
+            required_pkgs="curl coreutils procps-ng ip-full"
+            optional_ping_pkg="iputils"
             if ! command -v apk >/dev/null 2>&1; then
                 error "未找到 apk 包管理器。"
             fi
@@ -146,8 +146,11 @@ install_deps() {
             apk add --no-cache --quiet $required_pkgs >/dev/null 2>&1 || \
                 apk add --no-cache $required_pkgs || \
                 warn "部分依赖安装失败，请手动执行: apk add $required_pkgs"
+            apk add --no-cache --quiet $optional_ping_pkg >/dev/null 2>&1 || true
             ;;
         opkg)
+            required_pkgs="curl coreutils procps-ng ip-full"
+            optional_ping_pkg="iputils-ping"
             if ! command -v opkg >/dev/null 2>&1; then
                 error "未找到 opkg 包管理器，当前系统不是 OpenWrt 系列。"
             fi
@@ -156,6 +159,7 @@ install_deps() {
             opkg install $required_pkgs >/dev/null 2>&1 || \
                 opkg install --force-overwrite $required_pkgs >/dev/null 2>&1 || \
                 warn "部分依赖安装失败，请手动执行: opkg install $required_pkgs"
+            opkg install $optional_ping_pkg >/dev/null 2>&1 || true
             ;;
         *)
             error "未知的包管理器: $PKG_MGR"
@@ -174,6 +178,10 @@ install_deps() {
             warn "缺少可选依赖: $cmd（不影响核心监控功能）"
         fi
     done
+
+    if ! command -v ping >/dev/null 2>&1; then
+        warn "未找到 ping，丢包率监控将上报为空；可手动安装 iputils-ping 或系统自带 ping 包"
+    fi
 
     info "基础依赖组件检查通过"
 
@@ -566,6 +574,34 @@ get_ping() {
     fi
 }
 
+get_packet_loss() {
+    host="${1:-}"
+    count="${2:-5}"
+
+    if [ -z "$host" ] || ! command -v ping >/dev/null 2>&1; then
+        echo ""
+        return
+    fi
+
+    timeout_arg=""
+    if ping -W 1 -c 1 127.0.0.1 >/dev/null 2>&1; then
+        timeout_arg="-W 1"
+    fi
+
+    ping -c "$count" $timeout_arg "$host" 2>/dev/null | awk -F',' '/packet loss/{
+        for (i=1; i<=NF; i++) {
+            if ($i ~ /packet loss/) {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+                split($i, a, "%")
+                gsub(/[^0-9.]/, "", a[1])
+                if (a[1] != "") {
+                    printf "%.0f\n", a[1]
+                }
+            }
+        }
+    }'
+}
+
 CT_NODE="${CT_NODE:-}"
 CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
@@ -590,6 +626,10 @@ run_network_worker() {
             [ -n "$CU_NODE" ] && get_ping "$CU_NODE" > /tmp/.cf_ping_cu.tmp && mv /tmp/.cf_ping_cu.tmp /tmp/.cf_ping_cu || rm -f /tmp/.cf_ping_cu
             [ -n "$CM_NODE" ] && get_ping "$CM_NODE" > /tmp/.cf_ping_cm.tmp && mv /tmp/.cf_ping_cm.tmp /tmp/.cf_ping_cm || rm -f /tmp/.cf_ping_cm
             [ -n "$BD_NODE" ] && get_ping "$BD_NODE" > /tmp/.cf_ping_bd.tmp && mv /tmp/.cf_ping_bd.tmp /tmp/.cf_ping_bd || rm -f /tmp/.cf_ping_bd
+            [ -n "$CT_NODE" ] && get_packet_loss "$CT_NODE" > /tmp/.cf_loss_ct.tmp && mv /tmp/.cf_loss_ct.tmp /tmp/.cf_loss_ct || rm -f /tmp/.cf_loss_ct
+            [ -n "$CU_NODE" ] && get_packet_loss "$CU_NODE" > /tmp/.cf_loss_cu.tmp && mv /tmp/.cf_loss_cu.tmp /tmp/.cf_loss_cu || rm -f /tmp/.cf_loss_cu
+            [ -n "$CM_NODE" ] && get_packet_loss "$CM_NODE" > /tmp/.cf_loss_cm.tmp && mv /tmp/.cf_loss_cm.tmp /tmp/.cf_loss_cm || rm -f /tmp/.cf_loss_cm
+            [ -n "$BD_NODE" ] && get_packet_loss "$BD_NODE" > /tmp/.cf_loss_bd.tmp && mv /tmp/.cf_loss_bd.tmp /tmp/.cf_loss_bd || rm -f /tmp/.cf_loss_bd
             last_ping="$now"
         fi
         sleep 5
@@ -736,13 +776,17 @@ while true; do
     [ -f /tmp/.cf_ping_cu ] && PING_CU=$(cat /tmp/.cf_ping_cu) || PING_CU=""
     [ -f /tmp/.cf_ping_cm ] && PING_CM=$(cat /tmp/.cf_ping_cm) || PING_CM=""
     [ -f /tmp/.cf_ping_bd ] && PING_BD=$(cat /tmp/.cf_ping_bd) || PING_BD=""
+    [ -f /tmp/.cf_loss_ct ] && LOSS_CT=$(cat /tmp/.cf_loss_ct) || LOSS_CT=""
+    [ -f /tmp/.cf_loss_cu ] && LOSS_CU=$(cat /tmp/.cf_loss_cu) || LOSS_CU=""
+    [ -f /tmp/.cf_loss_cm ] && LOSS_CM=$(cat /tmp/.cf_loss_cm) || LOSS_CM=""
+    [ -f /tmp/.cf_loss_bd ] && LOSS_BD=$(cat /tmp/.cf_loss_bd) || LOSS_BD=""
 
     EOS=$(escape_json "${OS}")
     EARCH=$(escape_json "${ARCH}")
     ECPU=$(escape_json "${CPU_INFO}")
 
     PAYLOAD=$(cat <<EOF
-{"id":"$SERVER_ID","secret":"$SECRET","metrics":{"cpu":"$CPU","ram":"$RAM","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","disk":"$DISK","disk_total":"$DISK_TOTAL","disk_used":"$DISK_USED","load_avg":"$LOAD_AVG","boot_time":"$BOOT_TIME","net_rx":"$RX_NOW","net_tx":"$TX_NOW","net_rx_monthly":"$RX_MONTHLY","net_tx_monthly":"$TX_MONTHLY","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED","os":"$EOS","arch":"$EARCH","cpu_info":"$ECPU","cpu_cores":"$CPU_CORES","processes":"$PROCESSES","tcp_conn":"$TCP_CONN","udp_conn":"$UDP_CONN","ip_v4":"$IPV4","ip_v6":"$IPV6","ping_ct":"$PING_CT","ping_cu":"$PING_CU","ping_cm":"$PING_CM","ping_bd":"$PING_BD"}}
+{"id":"$SERVER_ID","secret":"$SECRET","metrics":{"cpu":"$CPU","ram":"$RAM","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","disk":"$DISK","disk_total":"$DISK_TOTAL","disk_used":"$DISK_USED","load_avg":"$LOAD_AVG","boot_time":"$BOOT_TIME","net_rx":"$RX_NOW","net_tx":"$TX_NOW","net_rx_monthly":"$RX_MONTHLY","net_tx_monthly":"$TX_MONTHLY","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED","os":"$EOS","arch":"$EARCH","cpu_info":"$ECPU","cpu_cores":"$CPU_CORES","processes":"$PROCESSES","tcp_conn":"$TCP_CONN","udp_conn":"$UDP_CONN","ip_v4":"$IPV4","ip_v6":"$IPV6","ping_ct":"$PING_CT","ping_cu":"$PING_CU","ping_cm":"$PING_CM","ping_bd":"$PING_BD","loss_ct":"$LOSS_CT","loss_cu":"$LOSS_CU","loss_cm":"$LOSS_CM","loss_bd":"$LOSS_BD"}}
 EOF
 )
     curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "$PAYLOAD" -m 4 --connect-timeout 2 "$WORKER_URL" 2>/dev/null || true
@@ -1170,7 +1214,7 @@ uninstall_probe() {
     rm -f "${SCRIPT_FILE}.ctl"
 
     step "抹除共享内存高速缓存区..."
-    rm -f /tmp/.cf_ipv4 /tmp/.cf_ipv6 /tmp/.cf_ping_* 2>/dev/null || true
+    rm -f /tmp/.cf_ipv4 /tmp/.cf_ipv6 /tmp/.cf_ping_* /tmp/.cf_loss_* 2>/dev/null || true
 
     step "抹除流量追踪数据..."
     rm -rf /var/lib/${SERVICE_NAME}

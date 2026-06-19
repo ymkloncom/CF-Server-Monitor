@@ -122,7 +122,8 @@ install_deps() {
     # coreutils: 提供完整的 df -P、date、nproc、stat 等
     # procps:    提供完整的 ps -e、pgrep、pkill
     # iproute2:  提供 ss
-    local required_pkgs="bash curl grep sed coreutils procps iproute2"
+    # iputils:   提供 ping，用于丢包率探测
+    local required_pkgs="bash curl grep sed coreutils procps iproute2 iputils"
 
     if ! command -v apk >/dev/null 2>&1; then
         error "未找到 apk 包管理器，当前系统不是 Alpine Linux。"
@@ -141,6 +142,10 @@ install_deps() {
             error "缺少必要依赖: $cmd，请手动安装后重试。"
         fi
     done
+
+    if ! command -v ping >/dev/null 2>&1; then
+        warn "未找到 ping，丢包率监控将上报为空；可手动安装: apk add iputils"
+    fi
 
     info "基础依赖组件检查通过（bash/coreutils/procps/iproute2/curl）"
 
@@ -464,6 +469,35 @@ get_ping() {
     fi
 }
 
+get_packet_loss() {
+    local host="${1:-}"
+    local count="${2:-5}"
+
+    if [ -z "$host" ] || ! command -v ping >/dev/null 2>&1; then
+        echo ""
+        return
+    fi
+
+    local timeout_arg=""
+    if ping -W 1 -c 1 127.0.0.1 >/dev/null 2>&1; then
+        timeout_arg="-W 1"
+    fi
+
+    # shellcheck disable=SC2086
+    ping -c "$count" $timeout_arg "$host" 2>/dev/null | awk -F',' '/packet loss/{
+        for (i=1; i<=NF; i++) {
+            if ($i ~ /packet loss/) {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+                split($i, a, "%")
+                gsub(/[^0-9.]/, "", a[1])
+                if (a[1] != "") {
+                    printf "%.0f\n", a[1]
+                }
+            }
+        }
+    }'
+}
+
 CT_NODE="${CT_NODE:-}"
 CU_NODE="${CU_NODE:-}"
 CM_NODE="${CM_NODE:-}"
@@ -491,6 +525,10 @@ run_network_worker() {
             [ -n "$CU_NODE" ] && get_ping "$CU_NODE" > /dev/shm/.cf_ping_cu.tmp && mv /dev/shm/.cf_ping_cu.tmp /dev/shm/.cf_ping_cu || rm -f /dev/shm/.cf_ping_cu
             [ -n "$CM_NODE" ] && get_ping "$CM_NODE" > /dev/shm/.cf_ping_cm.tmp && mv /dev/shm/.cf_ping_cm.tmp /dev/shm/.cf_ping_cm || rm -f /dev/shm/.cf_ping_cm
             [ -n "$BD_NODE" ] && get_ping "$BD_NODE" > /dev/shm/.cf_ping_bd.tmp && mv /dev/shm/.cf_ping_bd.tmp /dev/shm/.cf_ping_bd || rm -f /dev/shm/.cf_ping_bd
+            [ -n "$CT_NODE" ] && get_packet_loss "$CT_NODE" > /dev/shm/.cf_loss_ct.tmp && mv /dev/shm/.cf_loss_ct.tmp /dev/shm/.cf_loss_ct || rm -f /dev/shm/.cf_loss_ct
+            [ -n "$CU_NODE" ] && get_packet_loss "$CU_NODE" > /dev/shm/.cf_loss_cu.tmp && mv /dev/shm/.cf_loss_cu.tmp /dev/shm/.cf_loss_cu || rm -f /dev/shm/.cf_loss_cu
+            [ -n "$CM_NODE" ] && get_packet_loss "$CM_NODE" > /dev/shm/.cf_loss_cm.tmp && mv /dev/shm/.cf_loss_cm.tmp /dev/shm/.cf_loss_cm || rm -f /dev/shm/.cf_loss_cm
+            [ -n "$BD_NODE" ] && get_packet_loss "$BD_NODE" > /dev/shm/.cf_loss_bd.tmp && mv /dev/shm/.cf_loss_bd.tmp /dev/shm/.cf_loss_bd || rm -f /dev/shm/.cf_loss_bd
             last_ping="$now"
         fi
         sleep 5
@@ -642,13 +680,17 @@ while true; do
     [ -f /dev/shm/.cf_ping_cu ] && PING_CU=$(cat /dev/shm/.cf_ping_cu) || PING_CU=""
     [ -f /dev/shm/.cf_ping_cm ] && PING_CM=$(cat /dev/shm/.cf_ping_cm) || PING_CM=""
     [ -f /dev/shm/.cf_ping_bd ] && PING_BD=$(cat /dev/shm/.cf_ping_bd) || PING_BD=""
+    [ -f /dev/shm/.cf_loss_ct ] && LOSS_CT=$(cat /dev/shm/.cf_loss_ct) || LOSS_CT=""
+    [ -f /dev/shm/.cf_loss_cu ] && LOSS_CU=$(cat /dev/shm/.cf_loss_cu) || LOSS_CU=""
+    [ -f /dev/shm/.cf_loss_cm ] && LOSS_CM=$(cat /dev/shm/.cf_loss_cm) || LOSS_CM=""
+    [ -f /dev/shm/.cf_loss_bd ] && LOSS_BD=$(cat /dev/shm/.cf_loss_bd) || LOSS_BD=""
 
     EOS=$(escape_json "${OS}")
     EARCH=$(escape_json "${ARCH}")
     ECPU=$(escape_json "${CPU_INFO}")
 
     PAYLOAD=$(cat <<EOF
-{"id":"$SERVER_ID","secret":"$SECRET","metrics":{"cpu":"$CPU","ram":"$RAM","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","disk":"$DISK","disk_total":"$DISK_TOTAL","disk_used":"$DISK_USED","load_avg":"$LOAD_AVG","boot_time":"$BOOT_TIME","net_rx":"$RX_NOW","net_tx":"$TX_NOW","net_rx_monthly":"$RX_MONTHLY","net_tx_monthly":"$TX_MONTHLY","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED","os":"$EOS","arch":"$EARCH","cpu_info":"$ECPU","cpu_cores":"$CPU_CORES","processes":"$PROCESSES","tcp_conn":"$TCP_CONN","udp_conn":"$UDP_CONN","ip_v4":"$IPV4","ip_v6":"$IPV6","ping_ct":"$PING_CT","ping_cu":"$PING_CU","ping_cm":"$PING_CM","ping_bd":"$PING_BD"}}
+{"id":"$SERVER_ID","secret":"$SECRET","metrics":{"cpu":"$CPU","ram":"$RAM","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","disk":"$DISK","disk_total":"$DISK_TOTAL","disk_used":"$DISK_USED","load_avg":"$LOAD_AVG","boot_time":"$BOOT_TIME","net_rx":"$RX_NOW","net_tx":"$TX_NOW","net_rx_monthly":"$RX_MONTHLY","net_tx_monthly":"$TX_MONTHLY","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED","os":"$EOS","arch":"$EARCH","cpu_info":"$ECPU","cpu_cores":"$CPU_CORES","processes":"$PROCESSES","tcp_conn":"$TCP_CONN","udp_conn":"$UDP_CONN","ip_v4":"$IPV4","ip_v6":"$IPV6","ping_ct":"$PING_CT","ping_cu":"$PING_CU","ping_cm":"$PING_CM","ping_bd":"$PING_BD","loss_ct":"$LOSS_CT","loss_cu":"$LOSS_CU","loss_cm":"$LOSS_CM","loss_bd":"$LOSS_BD"}}
 EOF
 )
     curl -s -o /dev/null -X POST -H "Content-Type: application/json" -d "$PAYLOAD" -m 4 --connect-timeout 2 "$WORKER_URL" 2>/dev/null || true
@@ -1001,7 +1043,7 @@ uninstall_probe() {
     rm -f "${SCRIPT_FILE}.ctl"
 
     step "抹除共享内存高速缓存区..."
-    rm -f /dev/shm/.cf_ipv4 /dev/shm/.cf_ipv6 /dev/shm/.cf_ping_* 2>/dev/null || true
+    rm -f /dev/shm/.cf_ipv4 /dev/shm/.cf_ipv6 /dev/shm/.cf_ping_* /dev/shm/.cf_loss_* 2>/dev/null || true
 
     step "抹除流量追踪数据..."
     rm -rf /var/lib/${SERVICE_NAME}

@@ -102,15 +102,23 @@ detect_os() {
 
 install_deps() {
     step "检查系统依赖组件..."
-    local required_cmds=("curl" "awk" "grep" "sed" "ps" "df")
+    local required_cmds=("curl" "awk" "grep" "sed" "ps" "df" "ping")
     
     for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             warn "缺少必要依赖: $cmd，正在尝试自动安装..."
+            local pkg="$cmd"
+            if [ "$cmd" = "ping" ]; then
+                if [ "${PKG_MGR:-apt-get}" = "apt-get" ]; then
+                    pkg="iputils-ping"
+                else
+                    pkg="iputils"
+                fi
+            fi
             if [ "${PKG_MGR:-apt-get}" = "apt-get" ]; then
-                apt-get update -qq && apt-get install -y -qq "$cmd" >/dev/null 2>&1 || true
+                apt-get update -qq && apt-get install -y -qq "$pkg" >/dev/null 2>&1 || true
             else
-                yum install -y -q "$cmd" >/dev/null 2>&1 || true
+                yum install -y -q "$pkg" >/dev/null 2>&1 || true
             fi
         fi
         if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -374,6 +382,29 @@ get_ping() {
     fi
 }
 
+get_packet_loss() {
+    local host="${1:-}"
+    local count="${2:-5}"
+
+    if [ -z "$host" ] || ! command -v ping >/dev/null 2>&1; then
+        echo ""
+        return
+    fi
+
+    ping -c "$count" -W 1 "$host" 2>/dev/null | awk -F',' '/packet loss/{
+        for (i=1; i<=NF; i++) {
+            if ($i ~ /packet loss/) {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+                split($i, a, "%")
+                gsub(/[^0-9.]/, "", a[1])
+                if (a[1] != "") {
+                    printf "%.0f\n", a[1]
+                }
+            }
+        }
+    }'
+}
+
 # 测试节点定义（支持参数覆盖，空值则跳过）
 CT_NODE="${CT_NODE:-}"
 CU_NODE="${CU_NODE:-}"
@@ -405,6 +436,10 @@ run_network_worker() {
             [ -n "$CU_NODE" ] && get_ping "$CU_NODE" > /dev/shm/.cf_ping_cu.tmp && mv /dev/shm/.cf_ping_cu.tmp /dev/shm/.cf_ping_cu || rm -f /dev/shm/.cf_ping_cu
             [ -n "$CM_NODE" ] && get_ping "$CM_NODE" > /dev/shm/.cf_ping_cm.tmp && mv /dev/shm/.cf_ping_cm.tmp /dev/shm/.cf_ping_cm || rm -f /dev/shm/.cf_ping_cm
             [ -n "$BD_NODE" ] && get_ping "$BD_NODE" > /dev/shm/.cf_ping_bd.tmp && mv /dev/shm/.cf_ping_bd.tmp /dev/shm/.cf_ping_bd || rm -f /dev/shm/.cf_ping_bd
+            [ -n "$CT_NODE" ] && get_packet_loss "$CT_NODE" > /dev/shm/.cf_loss_ct.tmp && mv /dev/shm/.cf_loss_ct.tmp /dev/shm/.cf_loss_ct || rm -f /dev/shm/.cf_loss_ct
+            [ -n "$CU_NODE" ] && get_packet_loss "$CU_NODE" > /dev/shm/.cf_loss_cu.tmp && mv /dev/shm/.cf_loss_cu.tmp /dev/shm/.cf_loss_cu || rm -f /dev/shm/.cf_loss_cu
+            [ -n "$CM_NODE" ] && get_packet_loss "$CM_NODE" > /dev/shm/.cf_loss_cm.tmp && mv /dev/shm/.cf_loss_cm.tmp /dev/shm/.cf_loss_cm || rm -f /dev/shm/.cf_loss_cm
+            [ -n "$BD_NODE" ] && get_packet_loss "$BD_NODE" > /dev/shm/.cf_loss_bd.tmp && mv /dev/shm/.cf_loss_bd.tmp /dev/shm/.cf_loss_bd || rm -f /dev/shm/.cf_loss_bd
             last_ping="$now"
         fi
         sleep 5
@@ -570,6 +605,10 @@ while true; do
     [ -f /dev/shm/.cf_ping_cu ] && PING_CU=$(cat /dev/shm/.cf_ping_cu) || PING_CU=""
     [ -f /dev/shm/.cf_ping_cm ] && PING_CM=$(cat /dev/shm/.cf_ping_cm) || PING_CM=""
     [ -f /dev/shm/.cf_ping_bd ] && PING_BD=$(cat /dev/shm/.cf_ping_bd) || PING_BD=""
+    [ -f /dev/shm/.cf_loss_ct ] && LOSS_CT=$(cat /dev/shm/.cf_loss_ct) || LOSS_CT=""
+    [ -f /dev/shm/.cf_loss_cu ] && LOSS_CU=$(cat /dev/shm/.cf_loss_cu) || LOSS_CU=""
+    [ -f /dev/shm/.cf_loss_cm ] && LOSS_CM=$(cat /dev/shm/.cf_loss_cm) || LOSS_CM=""
+    [ -f /dev/shm/.cf_loss_bd ] && LOSS_BD=$(cat /dev/shm/.cf_loss_bd) || LOSS_BD=""
 
     # 安全地构建闭合规范的 JSON 数据流
     EOS=$(escape_json "${OS}")
@@ -577,7 +616,7 @@ while true; do
     ECPU=$(escape_json "${CPU_INFO}")
 
     PAYLOAD=$(cat <<EOF
-{"id":"$SERVER_ID","secret":"$SECRET","metrics":{"cpu":"$CPU","ram":"$RAM","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","disk":"$DISK","disk_total":"$DISK_TOTAL","disk_used":"$DISK_USED","load_avg":"$LOAD_AVG","boot_time":"$BOOT_TIME","net_rx":"$RX_NOW","net_tx":"$TX_NOW","net_rx_monthly":"$RX_MONTHLY","net_tx_monthly":"$TX_MONTHLY","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED","os":"$EOS","arch":"$EARCH","cpu_info":"$ECPU","cpu_cores":"$CPU_CORES","processes":"$PROCESSES","tcp_conn":"$TCP_CONN","udp_conn":"$UDP_CONN","ip_v4":"$IPV4","ip_v6":"$IPV6","ping_ct":"$PING_CT","ping_cu":"$PING_CU","ping_cm":"$PING_CM","ping_bd":"$PING_BD"}}
+{"id":"$SERVER_ID","secret":"$SECRET","metrics":{"cpu":"$CPU","ram":"$RAM","ram_total":"$RAM_TOTAL","ram_used":"$RAM_USED","swap_total":"$SWAP_TOTAL","swap_used":"$SWAP_USED","disk":"$DISK","disk_total":"$DISK_TOTAL","disk_used":"$DISK_USED","load_avg":"$LOAD_AVG","boot_time":"$BOOT_TIME","net_rx":"$RX_NOW","net_tx":"$TX_NOW","net_rx_monthly":"$RX_MONTHLY","net_tx_monthly":"$TX_MONTHLY","net_in_speed":"$RX_SPEED","net_out_speed":"$TX_SPEED","os":"$EOS","arch":"$EARCH","cpu_info":"$ECPU","cpu_cores":"$CPU_CORES","processes":"$PROCESSES","tcp_conn":"$TCP_CONN","udp_conn":"$UDP_CONN","ip_v4":"$IPV4","ip_v6":"$IPV6","ping_ct":"$PING_CT","ping_cu":"$PING_CU","ping_cm":"$PING_CM","ping_bd":"$PING_BD","loss_ct":"$LOSS_CT","loss_cu":"$LOSS_CU","loss_cm":"$LOSS_CM","loss_bd":"$LOSS_BD"}}
 EOF
 )
     # 上报上游数据端 (限定 4s 超时控制，主循环绝不严重漂移)
@@ -858,7 +897,7 @@ uninstall_probe() {
     rm -f "${SCRIPT_FILE}"
 
     step "抹除共享内存高速缓存区..."
-    rm -f /dev/shm/.cf_ipv4 /dev/shm/.cf_ipv6 /dev/shm/.cf_ping_*
+    rm -f /dev/shm/.cf_ipv4 /dev/shm/.cf_ipv6 /dev/shm/.cf_ping_* /dev/shm/.cf_loss_*
 
     step "抹除流量追踪数据..."
     rm -rf /var/lib/${SERVICE_NAME}

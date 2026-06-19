@@ -125,7 +125,12 @@ export const fetchServerDetail = async (id) => {
 
 export const fetchAllHistory = async (id, hours) => {
   const result = await http.get(`/api/history/all?id=${id}&hours=${hours}`)
-  if (result.error) return null
+  if (result.error) {
+    const error = new Error(result.error)
+    error.code = result.code
+    error.status = result.status
+    throw error
+  }
   return result.data
 }
 

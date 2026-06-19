@@ -18,6 +18,10 @@ export function mergeMetricsIntoServer(server, metrics) {
   server.ping_cu = metrics.ping_cu;
   server.ping_cm = metrics.ping_cm;
   server.ping_bd = metrics.ping_bd;
+  server.loss_ct = metrics.loss_ct;
+  server.loss_cu = metrics.loss_cu;
+  server.loss_cm = metrics.loss_cm;
+  server.loss_bd = metrics.loss_bd;
   server.ram_total = metrics.ram_total || 0;
   server.ram_used = metrics.ram_used || 0;
   server.swap_total = metrics.swap_total || 0;
@@ -26,6 +30,8 @@ export function mergeMetricsIntoServer(server, metrics) {
   server.disk_used = metrics.disk_used || 0;
   server.cpu_cores = metrics.cpu_cores || 0;
   server.cpu_info = metrics.cpu_info || '';
+  server.gpu = metrics.gpu;
+  server.gpu_info = metrics.gpu_info || '';
   server.arch = metrics.arch || '';
   server.os = metrics.os || '';
   server.country = metrics.country || '';

@@ -80,7 +80,6 @@ export async function handleServersAPI(request, env, sys) {
       globalNetRx
     },
     countryStats,
-    latestMetricsMap: Object.fromEntries(latestMetricsMap),
     sysConfig: {
       show_price: sys.show_price === 'true',
       show_expire: sys.show_expire === 'true',

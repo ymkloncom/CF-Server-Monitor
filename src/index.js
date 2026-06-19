@@ -117,7 +117,22 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
     return createSuccessResponse(cached.data, { 'X-Cache': 'HIT' });
   }
   
-  const data = await getMetricsHistory(env.DB, id, clampedHours, columns);
+  let data;
+  try {
+    data = await getMetricsHistory(env.DB, id, clampedHours, columns);
+  } catch (e) {
+    const message = e && e.message ? e.message : String(e);
+    if (/no such column/i.test(message)) {
+      console.warn('[History] 数据库字段缺失，可能尚未升级数据库:', message);
+      return new Response(JSON.stringify({
+        code: 'DATABASE_UPGRADE_REQUIRED'
+      }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    throw e;
+  }
   
   setMetricsHistoryCache(id, clampedHours, columns, data);
   
@@ -261,7 +276,7 @@ export default {
         await ensureSiteSettings();
         const id = url.searchParams.get('id');
         const hours = parseFloat(url.searchParams.get('hours') || '24');
-        const allColumns = 'cpu, ram, disk, processes, net_in_speed, net_out_speed, tcp_conn, udp_conn, ping_ct, ping_cu, ping_cm, ping_bd, swap_total, swap_used, load_avg';
+        const allColumns = 'cpu, gpu, gpu_info, ram, disk, processes, net_in_speed, net_out_speed, tcp_conn, udp_conn, ping_ct, ping_cu, ping_cm, ping_bd, loss_ct, loss_cu, loss_cm, loss_bd, swap_total, swap_used, load_avg';
         return fetchHistoryData(env, request, id, hours, allColumns, sys);
       }},
       { method: 'POST', path: '/admin/api', handler: async () => {

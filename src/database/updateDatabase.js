@@ -134,6 +134,8 @@ async function addHistoryColumns(db) {
     const newHistoryCols = {
       cpu_cores: "INTEGER DEFAULT 0",
       cpu_info: "TEXT DEFAULT ''",
+      gpu: "REAL DEFAULT NULL",
+      gpu_info: "TEXT DEFAULT ''",
       arch: "TEXT DEFAULT ''",
       os: "TEXT DEFAULT ''",
       country: "TEXT DEFAULT ''",
@@ -141,7 +143,11 @@ async function addHistoryColumns(db) {
       ip_v6: "TEXT DEFAULT '0'",
       boot_time: "TEXT DEFAULT ''",
       net_rx_monthly: "REAL DEFAULT 0",
-      net_tx_monthly: "REAL DEFAULT 0"
+      net_tx_monthly: "REAL DEFAULT 0",
+      loss_ct: "INTEGER DEFAULT NULL",
+      loss_cu: "INTEGER DEFAULT NULL",
+      loss_cm: "INTEGER DEFAULT NULL",
+      loss_bd: "INTEGER DEFAULT NULL"
     };
     
     let added = 0;
@@ -206,6 +212,10 @@ async function optimizeMetricsHistoryRowid(db) {
         ping_cu INTEGER DEFAULT 0,
         ping_cm INTEGER DEFAULT 0,
         ping_bd INTEGER DEFAULT 0,
+        loss_ct INTEGER DEFAULT NULL,
+        loss_cu INTEGER DEFAULT NULL,
+        loss_cm INTEGER DEFAULT NULL,
+        loss_bd INTEGER DEFAULT NULL,
         ram_total REAL DEFAULT 0,
         ram_used REAL DEFAULT 0,
         swap_total REAL DEFAULT 0,
@@ -214,6 +224,8 @@ async function optimizeMetricsHistoryRowid(db) {
         disk_used REAL DEFAULT 0,
         cpu_cores INTEGER DEFAULT 0,
         cpu_info TEXT DEFAULT '',
+        gpu REAL DEFAULT NULL,
+        gpu_info TEXT DEFAULT '',
         arch TEXT DEFAULT '',
         os TEXT DEFAULT '',
         country TEXT DEFAULT '',
@@ -226,15 +238,22 @@ async function optimizeMetricsHistoryRowid(db) {
       )
     `).run();
 
+    const { results: historyColumns } = await db.prepare(`PRAGMA table_info(metrics_history)`).all();
+    const existingHistoryCols = new Set(historyColumns.map(c => c.name));
+    const historySelectExpr = (colName, fallback) => (
+      existingHistoryCols.has(colName) ? `COALESCE(${colName}, ${fallback})` : fallback
+    );
+
     await db.prepare(`
       INSERT INTO metrics_history_new (
         id, server_id, timestamp, cpu, ram, disk, load_avg,
         net_in_speed, net_out_speed, net_rx, net_tx,
         processes, tcp_conn, udp_conn,
         ping_ct, ping_cu, ping_cm, ping_bd,
+        loss_ct, loss_cu, loss_cm, loss_bd,
         ram_total, ram_used, swap_total, swap_used,
         disk_total, disk_used,
-        cpu_cores, cpu_info, arch, os, country, ip_v4, ip_v6, boot_time,
+        cpu_cores, cpu_info, gpu, gpu_info, arch, os, country, ip_v4, ip_v6, boot_time,
         net_rx_monthly, net_tx_monthly
       )
       SELECT
@@ -242,10 +261,11 @@ async function optimizeMetricsHistoryRowid(db) {
         net_in_speed, net_out_speed, net_rx, net_tx,
         processes, tcp_conn, udp_conn,
         ping_ct, ping_cu, ping_cm, ping_bd,
+        ${historySelectExpr('loss_ct', 'NULL')}, ${historySelectExpr('loss_cu', 'NULL')}, ${historySelectExpr('loss_cm', 'NULL')}, ${historySelectExpr('loss_bd', 'NULL')},
         ram_total, ram_used, swap_total, swap_used,
         disk_total, disk_used,
-        cpu_cores, cpu_info, arch, os, country, ip_v4, ip_v6, boot_time,
-        COALESCE(net_rx_monthly, 0), COALESCE(net_tx_monthly, 0)
+        cpu_cores, cpu_info, ${historySelectExpr('gpu', 'NULL')}, ${historySelectExpr('gpu_info', "''")}, arch, os, country, ip_v4, ip_v6, boot_time,
+        ${historySelectExpr('net_rx_monthly', '0')}, ${historySelectExpr('net_tx_monthly', '0')}
       FROM metrics_history
     `).run();
 

@@ -11,17 +11,19 @@ function generateMetrics(baseTimestamp, serverIdx, hourOffset) {
   const timeFactor = 1 - 0.3 * Math.cos((baseHour - 9) * Math.PI / 12);
   
   const baselines = [
-    { cpu: 35, ram: 45, ping: 80, load_avg: 1.2 },
-    { cpu: 25, ram: 35, ping: 35, load_avg: 0.8 }
+    { cpu: 35, ram: 45, ping: 80, load_avg: 1.2, gpu: 42 },
+    { cpu: 25, ram: 35, ping: 35, load_avg: 0.8, gpu: 28 }
   ];
   
   const baseline = baselines[serverIdx];
   const cpuNoise = (Math.random() - 0.5) * 20;
   const ramNoise = (Math.random() - 0.5) * 10;
   const pingNoise = (Math.random() - 0.5) * 15;
+  const gpuNoise = (Math.random() - 0.5) * 25;
   
   const cpu = Math.max(5, Math.min(95, baseline.cpu * timeFactor + cpuNoise));
   const ram = Math.max(10, Math.min(90, baseline.ram * timeFactor + ramNoise));
+  const gpu = Math.max(0, Math.min(100, baseline.gpu * timeFactor + gpuNoise));
   const ramTotal = serverIdx === 0 ? 32768 : 16384;
   const ramUsed = ramTotal * (ram / 100);
   
@@ -49,10 +51,16 @@ function generateMetrics(baseTimestamp, serverIdx, hourOffset) {
     ping_cu: Math.round(Math.max(10, baseline.ping + pingNoise)).toString(),
     ping_cm: Math.round(Math.max(10, baseline.ping * 1.1 + pingNoise)).toString(),
     ping_bd: Math.round(Math.max(10, baseline.ping * 1.5 + pingNoise)).toString(),
+    loss_ct: Math.floor(Math.random() * (serverIdx === 0 ? 8 : 3)).toString(),
+    loss_cu: Math.floor(Math.random() * (serverIdx === 0 ? 12 : 4)).toString(),
+    loss_cm: Math.floor(Math.random() * (serverIdx === 0 ? 10 : 5)).toString(),
+    loss_bd: Math.floor(Math.random() * (serverIdx === 0 ? 15 : 6)).toString(),
     ip_v4: '1',
     ip_v6: serverIdx === 0 ? '1' : '0',
     cpu_cores: serverIdx === 0 ? '4' : '2',
     cpu_info: serverIdx === 0 ? 'Intel Xeon E5-2680 v4' : 'AMD EPYC 7742',
+    gpu: gpu.toFixed(2),
+    gpu_info: serverIdx === 0 ? 'NVIDIA Tesla T4' : 'AMD Radeon Pro V620',
     arch: 'x86_64',
     os: serverIdx === 0 ? 'Ubuntu 22.04 LTS' : 'Debian 12',
     country: serverIdx === 0 ? 'US' : 'JP',
@@ -195,9 +203,10 @@ INSERT INTO metrics_history (
   net_in_speed, net_out_speed, net_rx, net_tx,
   processes, tcp_conn, udp_conn,
   ping_ct, ping_cu, ping_cm, ping_bd,
+  loss_ct, loss_cu, loss_cm, loss_bd,
   ram_total, ram_used, swap_total, swap_used,
   disk_total, disk_used,
-  cpu_cores, cpu_info, arch, os, country,
+  cpu_cores, cpu_info, gpu, gpu_info, arch, os, country,
   ip_v4, ip_v6, boot_time,
   net_rx_monthly, net_tx_monthly
 ) VALUES (
@@ -218,6 +227,10 @@ INSERT INTO metrics_history (
   ${parseInt(metrics.ping_cu)},
   ${parseInt(metrics.ping_cm)},
   ${parseInt(metrics.ping_bd)},
+  ${parseInt(metrics.loss_ct)},
+  ${parseInt(metrics.loss_cu)},
+  ${parseInt(metrics.loss_cm)},
+  ${parseInt(metrics.loss_bd)},
   ${parseFloat(metrics.ram_total)},
   ${parseFloat(metrics.ram_used)},
   ${parseFloat(metrics.swap_total)},
@@ -226,6 +239,8 @@ INSERT INTO metrics_history (
   ${parseFloat(metrics.disk_used)},
   ${parseInt(metrics.cpu_cores)},
   '${metrics.cpu_info}',
+  ${parseFloat(metrics.gpu)},
+  '${metrics.gpu_info}',
   '${metrics.arch}',
   '${metrics.os}',
   '${metrics.country}',

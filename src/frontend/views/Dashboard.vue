@@ -356,9 +356,13 @@ const refreshData = async () => {
     const data = await fetchServers()
     if (!data) return
 
+    const rawServers = Array.isArray(data.servers)
+      ? data.servers
+      : Object.entries(data.latestMetricsMap || {}).map(([id, metrics]) => ({ id, ...metrics }))
+
     // 合并已有列表与最新服务端全量数据（优先使用服务端返回的 name/group 等完整字段）
     const existingById = new Map(servers.value.map(s => [s.id, s]))
-    const nextList = (data.servers || []).map(s => {
+    const nextList = rawServers.map(s => {
       const prev = existingById.get(s.id)
       // 取服务端返回作为权威数据，并保留本地字段以防服务端缺少
       return { ...prev, ...s }

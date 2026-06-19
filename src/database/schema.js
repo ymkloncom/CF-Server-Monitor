@@ -68,6 +68,10 @@ export async function initDatabase(db) {
         ping_cu INTEGER DEFAULT 0,
         ping_cm INTEGER DEFAULT 0,
         ping_bd INTEGER DEFAULT 0,
+        loss_ct INTEGER DEFAULT NULL,
+        loss_cu INTEGER DEFAULT NULL,
+        loss_cm INTEGER DEFAULT NULL,
+        loss_bd INTEGER DEFAULT NULL,
         ram_total REAL DEFAULT 0,
         ram_used REAL DEFAULT 0,
         swap_total REAL DEFAULT 0,
@@ -76,6 +80,8 @@ export async function initDatabase(db) {
         disk_used REAL DEFAULT 0,
         cpu_cores INTEGER DEFAULT 0,
         cpu_info TEXT DEFAULT '',
+        gpu REAL DEFAULT NULL,
+        gpu_info TEXT DEFAULT '',
         arch TEXT DEFAULT '',
         os TEXT DEFAULT '',
         country TEXT DEFAULT '',
@@ -337,6 +343,13 @@ export async function saveMetricsHistory(db, serverId, metrics, countryCode = ''
       const num = parseInt(val);
       return (num > 0) ? num : null;
     };
+
+    const parseLoss = (val) => {
+      if (val === '' || val === null || val === undefined) return null;
+      const num = parseInt(val);
+      if (Number.isNaN(num)) return null;
+      return Math.max(0, Math.min(100, num));
+    };
     
     await db.prepare(`
       INSERT INTO metrics_history (
@@ -344,9 +357,10 @@ export async function saveMetricsHistory(db, serverId, metrics, countryCode = ''
         net_in_speed, net_out_speed, net_rx, net_tx,
         processes, tcp_conn, udp_conn,
         ping_ct, ping_cu, ping_cm, ping_bd,
+        loss_ct, loss_cu, loss_cm, loss_bd,
         ram_total, ram_used, swap_total, swap_used,
         disk_total, disk_used,
-        cpu_cores, cpu_info, arch, os, country, ip_v4, ip_v6, boot_time,
+        cpu_cores, cpu_info, gpu, gpu_info, arch, os, country, ip_v4, ip_v6, boot_time,
         net_rx_monthly, net_tx_monthly
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
@@ -354,8 +368,9 @@ export async function saveMetricsHistory(db, serverId, metrics, countryCode = ''
         ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?, ?, ?,
+        ?, ?, ?, ?,
         ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?
       )
     `).bind(
@@ -376,6 +391,10 @@ export async function saveMetricsHistory(db, serverId, metrics, countryCode = ''
       parsePing(metrics.ping_cu),
       parsePing(metrics.ping_cm),
       parsePing(metrics.ping_bd),
+      parseLoss(metrics.loss_ct),
+      parseLoss(metrics.loss_cu),
+      parseLoss(metrics.loss_cm),
+      parseLoss(metrics.loss_bd),
       parseFloat(metrics.ram_total) || 0,
       parseFloat(metrics.ram_used) || 0,
       parseFloat(metrics.swap_total) || 0,
@@ -384,6 +403,8 @@ export async function saveMetricsHistory(db, serverId, metrics, countryCode = ''
       parseFloat(metrics.disk_used) || 0,
       parseInt(metrics.cpu_cores) || 0,
       metrics.cpu_info || '',
+      metrics.gpu === '' || metrics.gpu === null || metrics.gpu === undefined ? null : (parseFloat(metrics.gpu) || 0),
+      metrics.gpu_info || '',
       metrics.arch || '',
       metrics.os || '',
       countryCode,
